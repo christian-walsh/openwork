@@ -501,6 +501,13 @@ export default function App() {
     return busy();
   });
 
+  const uiBusy = createMemo(() => {
+    const label = busyLabel();
+    // While a run is executing, we still need to allow answering questions and permissions.
+    if (busy() && label === "Running") return false;
+    return busy();
+  });
+
   const filteredPackages = createMemo(() => {
     const query = packageSearch().trim().toLowerCase();
     if (!query) return CURATED_PACKAGES;
@@ -1322,6 +1329,8 @@ export default function App() {
     if (!c) return;
 
     setBusy(true);
+    setBusyLabel("Responding");
+    setBusyStartedAt(Date.now());
     setError(null);
 
     try {
@@ -1331,6 +1340,8 @@ export default function App() {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setBusy(false);
+      setBusyLabel(null);
+      setBusyStartedAt(null);
     }
   }
 
@@ -1340,6 +1351,8 @@ export default function App() {
     if (!c || !request) return;
 
     setBusy(true);
+    setBusyLabel("Submitting answer");
+    setBusyStartedAt(Date.now());
     setError(null);
 
     try {
@@ -1362,6 +1375,8 @@ export default function App() {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setBusy(false);
+      setBusyLabel(null);
+      setBusyStartedAt(null);
     }
   }
 
@@ -1371,6 +1386,8 @@ export default function App() {
     if (!c || !request) return;
 
     setBusy(true);
+    setBusyLabel("Skipping question");
+    setBusyStartedAt(Date.now());
     setError(null);
 
     try {
@@ -1380,6 +1397,8 @@ export default function App() {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setBusy(false);
+      setBusyLabel(null);
+      setBusyStartedAt(null);
     }
   }
 
@@ -3211,7 +3230,7 @@ export default function App() {
                       variant="outline"
                       class="w-full border-red-500/20 text-red-400 hover:bg-red-950/30"
                       onClick={() => respondPermission(activePermission()!.id, "reject")}
-                      disabled={busy()}
+                      disabled={uiBusy()}
                     >
                       Deny
                     </Button>
@@ -3220,7 +3239,7 @@ export default function App() {
                         variant="secondary"
                         class="text-xs"
                         onClick={() => respondPermission(activePermission()!.id, "once")}
-                        disabled={busy()}
+                        disabled={uiBusy()}
                       >
                         Once
                       </Button>
@@ -3228,7 +3247,7 @@ export default function App() {
                         variant="primary"
                         class="text-xs font-bold bg-amber-500 hover:bg-amber-400 text-black border-none shadow-amber-500/20"
                         onClick={() => respondPermission(activePermission()!.id, "always")}
-                        disabled={busy()}
+                        disabled={uiBusy()}
                       >
                         Allow
                       </Button>
@@ -3334,14 +3353,14 @@ export default function App() {
                   </div>
 
                   <div class="flex items-center justify-end gap-2">
-                    <Button variant="outline" onClick={rejectQuestion} disabled={busy()}>
+                    <Button variant="outline" onClick={rejectQuestion} disabled={uiBusy()}>
                       Skip
                     </Button>
                     <Button
                       variant="primary"
                       class="bg-blue-500 hover:bg-blue-400 text-black"
                       onClick={replyToQuestion}
-                      disabled={busy() || !questionReady()}
+                      disabled={uiBusy() || !questionReady()}
                     >
                       Submit
                     </Button>
