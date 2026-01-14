@@ -16,6 +16,7 @@ import type {
   Message,
   Part,
   PermissionRequest as ApiPermissionRequest,
+  QuestionRequest,
   Session,
 } from "@opencode-ai/sdk/v2/client";
 
@@ -122,6 +123,34 @@ type SuggestedPlugin = {
 };
 
 type PluginScope = "project" | "global";
+
+type ProviderListResponse = {
+  all: Array<{
+    id: string;
+    name: string;
+    models: Record<
+      string,
+      {
+        id: string;
+        name: string;
+        family?: string;
+        release_date?: string;
+        status?: "alpha" | "beta" | "deprecated";
+      }
+    >;
+  }>;
+  connected: string[];
+  default: Record<string, string>;
+};
+
+type ModelOption = {
+  providerID: string;
+  providerName: string;
+  modelID: string;
+  modelName: string;
+  status?: string;
+  connected: boolean;
+};
 
 type PendingPermission = ApiPermissionRequest & {
   receivedAt: number;
@@ -275,6 +304,20 @@ function normalizeEvent(raw: unknown): OpencodeEvent | null {
   return null;
 }
 
+function extractSessionInfo(record: Record<string, unknown>): Session | null {
+  const candidate =
+    (record.info as Session | undefined) ??
+    (record.session as Session | undefined) ??
+    (record.data as Session | undefined) ??
+    (record as Session | undefined);
+
+  if (candidate && typeof candidate === "object" && typeof candidate.id === "string") {
+    return candidate;
+  }
+
+  return null;
+}
+
 function formatRelativeTime(timestampMs: number) {
   const delta = Date.now() - timestampMs;
 
@@ -297,13 +340,28 @@ function formatRelativeTime(timestampMs: number) {
   return new Date(timestampMs).toLocaleDateString();
 }
 
+const DEFAULT_SESSION_TITLE = "New task";
+
+function isDefaultSessionTitle(title?: string | null) {
+  if (!title) return true;
+  return title.trim().toLowerCase() === DEFAULT_SESSION_TITLE.toLowerCase();
+}
+
+function sortSessions(list: Session[]) {
+  return list.slice().sort((a, b) => {
+    const aTime = a.time?.updated ?? a.time?.created ?? 0;
+    const bTime = b.time?.updated ?? b.time?.created ?? 0;
+    return bTime - aTime;
+  });
+}
+
 function upsertSession(list: Session[], next: Session) {
   const idx = list.findIndex((s) => s.id === next.id);
-  if (idx === -1) return [...list, next];
+  if (idx === -1) return sortSessions([...list, next]);
 
   const copy = list.slice();
   copy[idx] = next;
-  return copy;
+  return sortSessions(copy);
 }
 
 function upsertMessage(list: MessageWithParts[], nextInfo: Message) {
@@ -379,12 +437,16 @@ export default function App() {
   const [sessions, setSessions] = createSignal<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [sessionStatusById, setSessionStatusById] = createSignal<Record<string, string>>({});
+  const [sessionTitleOverrides, setSessionTitleOverrides] = createSignal<Record<string, string>>({});
 
   const [messages, setMessages] = createSignal<MessageWithParts[]>([]);
   const [todos, setTodos] = createSignal<
     Array<{ id: string; content: string; status: string; priority: string }>
   >([]);
   const [pendingPermissions, setPendingPermissions] = createSignal<PendingPermission[]>([]);
+  const [pendingQuestions, setPendingQuestions] = createSignal<QuestionRequest[]>([]);
+  const [questionSelections, setQuestionSelections] = createSignal<string[][]>([]);
+  const [questionCustomInputs, setQuestionCustomInputs] = createSignal<string[]>([]);
 
   const [prompt, setPrompt] = createSignal("");
   const [lastPromptSent, setLastPromptSent] = createSignal("");
@@ -406,6 +468,11 @@ export default function App() {
   const [pluginInput, setPluginInput] = createSignal("");
   const [pluginStatus, setPluginStatus] = createSignal<string | null>(null);
   const [activePluginGuide, setActivePluginGuide] = createSignal<string | null>(null);
+
+  const [modelOptions, setModelOptions] = createSignal<ModelOption[]>([]);
+  const [selectedModel, setSelectedModel] = createSignal<ModelOption | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
+  const [modelSearch, setModelSearch] = createSignal("");
 
   const [events, setEvents] = createSignal<OpencodeEvent[]>([]);
   const [developerMode, setDeveloperMode] = createSignal(false);
@@ -497,6 +564,11 @@ export default function App() {
     return sessionStatusById()[id] ?? "idle";
   });
 
+  const selectedSessionTitle = createMemo(() => {
+    const session = selectedSession();
+    return session ? displaySessionTitle(session) : "Session";
+  });
+
   const activePermission = createMemo(() => {
     const id = selectedSessionId();
     const list = pendingPermissions();
@@ -506,6 +578,63 @@ export default function App() {
     }
 
     return list[0] ?? null;
+  });
+
+  const activeQuestion = createMemo(() => {
+    const id = selectedSessionId();
+    const list = pendingQuestions();
+
+    if (id) {
+      return list.find((q) => q.sessionID === id) ?? null;
+    }
+
+    return list[0] ?? null;
+  });
+
+  const selectedModelLabel = createMemo(() => {
+    const model = selectedModel();
+    if (!model) return "Default model";
+    return `${model.providerName} · ${model.modelName}`;
+  });
+
+  const selectedModelPayload = createMemo(() => {
+    const model = selectedModel();
+    if (!model) return undefined;
+    return { providerID: model.providerID, modelID: model.modelID };
+  });
+
+  const filteredModels = createMemo(() => {
+    const query = modelSearch().trim().toLowerCase();
+    if (!query) return modelOptions();
+
+    return modelOptions().filter((model) => {
+      const haystack = [model.providerName, model.modelName, model.modelID, model.providerID]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  });
+
+  const displaySessionTitle = (session: Session) => {
+    const override = sessionTitleOverrides()[session.id];
+    return override ?? session.title ?? DEFAULT_SESSION_TITLE;
+  };
+
+  const questionReady = createMemo(() => {
+    const request = activeQuestion();
+    if (!request) return false;
+
+    return request.questions.every((question, index) => {
+      const selected = questionSelections()[index] ?? [];
+      const custom = questionCustomInputs()[index]?.trim();
+      const hasCustom = question.custom !== false && !!custom;
+
+      if (question.multiple) {
+        return selected.length > 0 || hasCustom;
+      }
+
+      return selected.length > 0 || hasCustom;
+    });
   });
 
   async function refreshEngine() {
@@ -527,8 +656,24 @@ export default function App() {
   }
 
   async function loadSessions(c: Client) {
-    const list = unwrap(await c.session.list());
-    setSessions(list);
+    const list = unwrap(await c.session.list({ limit: 200 }));
+    const sorted = sortSessions(list);
+
+    setSessions(sorted);
+
+    setSessionTitleOverrides((current) => {
+      const byId = new Map(sorted.map((session) => [session.id, session] as const));
+      const next = { ...current };
+      for (const key of Object.keys(next)) {
+        const session = byId.get(key);
+        if (!session || !isDefaultSessionTitle(session.title)) {
+          delete next[key];
+        }
+      }
+      return next;
+    });
+
+    hydrateSessionTitles(sorted, c).catch(() => undefined);
   }
 
   async function refreshPendingPermissions(c: Client) {
@@ -539,6 +684,129 @@ export default function App() {
       const byId = new Map(current.map((p) => [p.id, p] as const));
       return list.map((p) => ({ ...p, receivedAt: byId.get(p.id)?.receivedAt ?? now }));
     });
+  }
+
+  async function refreshQuestions(c: Client) {
+    try {
+      const list = unwrap(await c.question.list());
+      setPendingQuestions(list);
+    } catch {
+      setPendingQuestions([]);
+    }
+  }
+
+  async function refreshModels(c: Client) {
+    try {
+      const providerResult = unwrap(await c.provider.list()) as ProviderListResponse;
+      const config = unwrap(await c.config.get());
+      const connected = new Set(providerResult.connected ?? []);
+
+      const options = providerResult.all.flatMap((provider) =>
+        Object.values(provider.models ?? {}).map((model) => ({
+          providerID: provider.id,
+          providerName: provider.name,
+          modelID: model.id,
+          modelName: model.name,
+          status: model.status,
+          connected: connected.has(provider.id),
+        })),
+      );
+
+      const sorted = options.sort((a, b) => {
+        if (a.providerName !== b.providerName) {
+          return a.providerName.localeCompare(b.providerName);
+        }
+        return a.modelName.localeCompare(b.modelName);
+      });
+
+      setModelOptions(sorted);
+
+      const storedRaw = typeof window !== "undefined"
+        ? window.localStorage.getItem("openwork.selectedModel")
+        : null;
+      const stored = storedRaw
+        ? (JSON.parse(storedRaw) as { providerID: string; modelID: string })
+        : null;
+
+      const configuredModel =
+        config.agent?.general?.model ||
+        config.agent?.build?.model ||
+        config.agent?.plan?.model ||
+        config.model ||
+        "";
+
+      const pickFromRef = (modelRef: string) => {
+        if (!modelRef) return null;
+        const normalized = modelRef.trim();
+        if (!normalized) return null;
+
+        const match = sorted.find((entry) => {
+          const dotRef = `${entry.providerID}.${entry.modelID}`;
+          const slashRef = `${entry.providerID}/${entry.modelID}`;
+          return (
+            entry.modelID === normalized ||
+            dotRef === normalized ||
+            slashRef === normalized
+          );
+        });
+        return match ?? null;
+      };
+
+      const fallbackProvider = providerResult.connected?.[0] ?? providerResult.all[0]?.id;
+      const fallbackModelId = fallbackProvider ? providerResult.default?.[fallbackProvider] : undefined;
+      const fallback = sorted.find(
+        (entry) => entry.providerID === fallbackProvider && entry.modelID === fallbackModelId,
+      );
+
+      setSelectedModel(
+        pickFromRef(configuredModel) ||
+          (stored
+            ? sorted.find(
+                (entry) =>
+                  entry.providerID === stored.providerID && entry.modelID === stored.modelID,
+              )
+            : null) ||
+          fallback ||
+          sorted[0] ||
+          null,
+      );
+    } catch {
+      setModelOptions([]);
+    }
+  }
+
+  function formatPromptTitle(text: string) {
+    const cleaned = text.replace(/\s+/g, " ").trim();
+    if (!cleaned) return null;
+    if (cleaned.length <= 80) return cleaned;
+    return `${cleaned.slice(0, 80)}…`;
+  }
+
+  async function hydrateSessionTitles(list: Session[], c: Client) {
+    const existing = sessionTitleOverrides();
+    const candidates = list.filter(
+      (session) => isDefaultSessionTitle(session.title) && !existing[session.id],
+    );
+
+    for (const session of candidates.slice(0, 12)) {
+      try {
+        const messageList = unwrap(await c.session.messages({ sessionID: session.id }));
+        const firstUser = messageList.find((msg) => msg.info.role === "user");
+        const textPart = firstUser?.parts.find((part) => part.type === "text") as
+          | { text?: string }
+          | undefined;
+        const title = textPart?.text ? formatPromptTitle(textPart.text) : null;
+
+        if (title) {
+          setSessionTitleOverrides((current) => ({
+            ...current,
+            [session.id]: title,
+          }));
+        }
+      } catch {
+        // ignore
+      }
+    }
   }
 
   async function connectToServer(nextBaseUrl: string, directory?: string) {
@@ -558,6 +826,8 @@ export default function App() {
 
       await loadSessions(nextClient);
       await refreshPendingPermissions(nextClient);
+      await refreshQuestions(nextClient);
+      await refreshModels(nextClient);
 
       setSelectedSessionId(null);
       setMessages([]);
@@ -635,6 +905,9 @@ export default function App() {
       setMessages([]);
       setTodos([]);
       setPendingPermissions([]);
+      setPendingQuestions([]);
+      setQuestionSelections([]);
+      setQuestionCustomInputs([]);
       setSessionStatusById({});
       setSseConnected(false);
 
@@ -668,6 +941,7 @@ export default function App() {
 
     try {
       await refreshPendingPermissions(c);
+      await refreshQuestions(c);
     } catch {
       // ignore
     }
@@ -715,6 +989,7 @@ export default function App() {
       unwrap(
         await c.session.prompt({
           sessionID,
+          model: selectedModelPayload(),
           parts: [{ type: "text", text: content }],
         }),
       );
@@ -739,7 +1014,8 @@ export default function App() {
   }
 
   function openTemplateModal() {
-    const seedTitle = selectedSession()?.title ?? "";
+    const session = selectedSession();
+    const seedTitle = session ? displaySessionTitle(session) : "";
     const seedPrompt = lastPromptSent() || prompt();
 
     setTemplateDraftTitle(seedTitle);
@@ -790,6 +1066,7 @@ export default function App() {
       unwrap(
         await c.session.prompt({
           sessionID: session.id,
+          model: selectedModelPayload(),
           parts: [{ type: "text", text: template.prompt }],
         }),
       );
@@ -1057,6 +1334,55 @@ export default function App() {
     }
   }
 
+  async function replyToQuestion() {
+    const c = client();
+    const request = activeQuestion();
+    if (!c || !request) return;
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      const answers = request.questions.map((question, index) => {
+        const selected = questionSelections()[index] ?? [];
+        const custom = question.custom !== false ? questionCustomInputs()[index]?.trim() : "";
+        const hasCustom = !!custom;
+
+        if (!question.multiple && hasCustom) {
+          return [custom!];
+        }
+
+        const merged = hasCustom ? [...selected, custom!] : selected;
+        return Array.from(new Set(merged.filter((entry) => entry && entry.trim())));
+      });
+
+      unwrap(await c.question.reply({ requestID: request.id, answers }));
+      await refreshQuestions(c);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rejectQuestion() {
+    const c = client();
+    const request = activeQuestion();
+    if (!c || !request) return;
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      unwrap(await c.question.reject({ requestID: request.id }));
+      await refreshQuestions(c);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function addAuthorizedDir() {
     const next = newAuthorizedDir().trim();
     if (!next) return;
@@ -1164,6 +1490,20 @@ export default function App() {
   });
 
   createEffect(() => {
+    if (typeof window === "undefined") return;
+    const model = selectedModel();
+    if (!model) return;
+    try {
+      window.localStorage.setItem(
+        "openwork.selectedModel",
+        JSON.stringify({ providerID: model.providerID, modelID: model.modelID }),
+      );
+    } catch {
+      // ignore
+    }
+  });
+
+  createEffect(() => {
     const c = client();
     if (!c) return;
 
@@ -1194,8 +1534,19 @@ export default function App() {
           if (event.type === "session.updated" || event.type === "session.created") {
             if (event.properties && typeof event.properties === "object") {
               const record = event.properties as Record<string, unknown>;
-              if (record.info && typeof record.info === "object") {
-                setSessions((current) => upsertSession(current, record.info as Session));
+              const info = extractSessionInfo(record);
+              if (info) {
+                setSessions((current) => upsertSession(current, info));
+                if (!isDefaultSessionTitle(info.title)) {
+                  setSessionTitleOverrides((current) => {
+                    if (!current[info.id]) return current;
+                    const next = { ...current };
+                    delete next[info.id];
+                    return next;
+                  });
+                } else {
+                  hydrateSessionTitles([info], c).catch(() => undefined);
+                }
               }
             }
           }
@@ -1203,9 +1554,15 @@ export default function App() {
           if (event.type === "session.deleted") {
             if (event.properties && typeof event.properties === "object") {
               const record = event.properties as Record<string, unknown>;
-              const info = record.info as Session | undefined;
+              const info = extractSessionInfo(record);
               if (info?.id) {
                 setSessions((current) => current.filter((s) => s.id !== info.id));
+                setSessionTitleOverrides((current) => {
+                  if (!current[info.id]) return current;
+                  const next = { ...current };
+                  delete next[info.id];
+                  return next;
+                });
               }
             }
           }
@@ -1303,6 +1660,28 @@ export default function App() {
               // ignore
             }
           }
+
+          if (event.type === "question.asked") {
+            if (event.properties && typeof event.properties === "object") {
+              const request = event.properties as QuestionRequest;
+              if (request.id) {
+                setPendingQuestions((current) => {
+                  if (current.some((item) => item.id === request.id)) return current;
+                  return [...current, request];
+                });
+              }
+            }
+          }
+
+          if (event.type === "question.replied" || event.type === "question.rejected") {
+            if (event.properties && typeof event.properties === "object") {
+              const record = event.properties as Record<string, unknown>;
+              const requestID = typeof record.requestID === "string" ? record.requestID : null;
+              if (requestID) {
+                setPendingQuestions((current) => current.filter((item) => item.id !== requestID));
+              }
+            }
+          }
         }
       } catch (e) {
         if (cancelled) return;
@@ -1318,6 +1697,18 @@ export default function App() {
       cancelled = true;
       controller.abort();
     });
+  });
+
+  createEffect(() => {
+    const request = activeQuestion();
+    if (!request) {
+      setQuestionSelections([]);
+      setQuestionCustomInputs([]);
+      return;
+    }
+
+    setQuestionSelections(request.questions.map(() => []));
+    setQuestionCustomInputs(request.questions.map(() => ""));
   });
 
   const headerStatus = createMemo(() => {
@@ -1831,7 +2222,7 @@ export default function App() {
                         #{s.slug?.slice(0, 2) ?? ".."}
                       </div>
                       <div>
-                        <div class="font-medium text-sm text-zinc-200">{s.title}</div>
+                        <div class="font-medium text-sm text-zinc-200">{displaySessionTitle(s)}</div>
                         <div class="text-xs text-zinc-500 flex items-center gap-2">
                           <Clock size={10} /> {formatRelativeTime(s.time.updated)}
                         </div>
@@ -1876,7 +2267,7 @@ export default function App() {
                         #{s.slug?.slice(0, 2) ?? ".."}
                       </div>
                       <div>
-                        <div class="font-medium text-sm text-zinc-200">{s.title}</div>
+                        <div class="font-medium text-sm text-zinc-200">{displaySessionTitle(s)}</div>
                         <div class="text-xs text-zinc-500 flex items-center gap-2">
                           <Clock size={10} /> {formatRelativeTime(s.time.updated)}
                         </div>
@@ -2562,7 +2953,7 @@ export default function App() {
                 <ArrowRight class="rotate-180 w-5 h-5" />
               </Button>
               <div>
-                <h2 class="font-semibold text-sm">{selectedSession()?.title ?? "Session"}</h2>
+                <h2 class="font-semibold text-sm">{selectedSessionTitle()}</h2>
                 <div class="flex items-center gap-2 text-xs text-zinc-400">
                   <span
                     class={`w-2 h-2 rounded-full ${
@@ -2737,28 +3128,41 @@ export default function App() {
           </div>
 
           <div class="p-4 border-t border-zinc-800 bg-zinc-950 sticky bottom-0 z-20">
-            <div class="max-w-2xl mx-auto relative">
-              <input
-                type="text"
-                disabled={busy()}
-                value={prompt()}
-                onInput={(e) => setPrompt(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    sendPrompt().catch(() => undefined);
-                  }
-                }}
-                placeholder={busy() ? "Working..." : "Ask OpenWork to do something..."}
-                class="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-5 pr-14 text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-all disabled:opacity-50"
-              />
-              <button
-                disabled={!prompt().trim() || busy()}
-                onClick={() => sendPrompt().catch(() => undefined)}
-                class="absolute right-2 top-2 p-2 bg-white text-black rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-0 disabled:scale-75"
-                title="Run"
-              >
-                <ArrowRight size={20} />
-              </button>
+            <div class="max-w-2xl mx-auto space-y-2">
+              <div class="flex items-center justify-between text-xs text-zinc-500">
+                <button
+                  class="flex items-center gap-2 text-zinc-200 hover:text-white transition-colors"
+                  onClick={() => setModelPickerOpen(true)}
+                  disabled={!modelOptions().length}
+                >
+                  <Cpu size={14} />
+                  {selectedModelLabel()}
+                </button>
+                <span>{modelOptions().length} models</span>
+              </div>
+              <div class="relative">
+                <input
+                  type="text"
+                  disabled={busy()}
+                  value={prompt()}
+                  onInput={(e) => setPrompt(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      sendPrompt().catch(() => undefined);
+                    }
+                  }}
+                  placeholder={busy() ? "Working..." : "Ask OpenWork to do something..."}
+                  class="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-5 pr-14 text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-all disabled:opacity-50"
+                />
+                <button
+                  disabled={!prompt().trim() || busy()}
+                  onClick={() => sendPrompt().catch(() => undefined)}
+                  class="absolute right-2 top-2 p-2 bg-white text-black rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-0 disabled:scale-75"
+                  title="Run"
+                >
+                  <ArrowRight size={20} />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2834,6 +3238,118 @@ export default function App() {
               </div>
             </div>
           </Show>
+
+          <Show when={activeQuestion()}>
+            <div class="absolute inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+              <div class="bg-zinc-900 border border-blue-500/30 w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden">
+                <div class="p-6 space-y-6">
+                  <div class="flex items-start gap-4">
+                    <div class="p-3 bg-blue-500/10 rounded-full text-blue-400">
+                      <Circle size={22} />
+                    </div>
+                    <div>
+                      <h3 class="text-lg font-semibold text-white">Question</h3>
+                      <p class="text-sm text-zinc-400 mt-1">
+                        OpenCode needs clarification to continue.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+                    <For each={activeQuestion()!.questions}>
+                      {(question, idx) => (
+                        <div class="bg-zinc-950/50 rounded-xl p-4 border border-zinc-800 space-y-3">
+                          <div class="text-xs text-zinc-500 uppercase tracking-wider font-semibold">
+                            {question.header}
+                          </div>
+                          <div class="text-sm text-zinc-200">{question.question}</div>
+                          <Show when={question.multiple}>
+                            <div class="text-xs text-zinc-500">Select all that apply.</div>
+                          </Show>
+
+                          <div class="space-y-2">
+                            <For each={question.options}>
+                              {(option) => {
+                                const selected = () =>
+                                  (questionSelections()[idx()] ?? []).includes(option.label);
+
+                                return (
+                                  <button
+                                    class={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
+                                      selected()
+                                        ? "border-blue-400/60 bg-blue-500/10 text-blue-100"
+                                        : "border-zinc-800 bg-zinc-900/60 text-zinc-200 hover:border-zinc-600"
+                                    }`}
+                                    onClick={() => {
+                                      setQuestionSelections((current) => {
+                                        const next = current.map((answers) => answers.slice());
+                                        const currentAnswers = next[idx()] ?? [];
+
+                                        if (question.multiple) {
+                                          if (currentAnswers.includes(option.label)) {
+                                            next[idx()] = currentAnswers.filter(
+                                              (entry) => entry !== option.label,
+                                            );
+                                          } else {
+                                            next[idx()] = [...currentAnswers, option.label];
+                                          }
+                                        } else {
+                                          next[idx()] = [option.label];
+                                        }
+
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    <div class="text-sm font-medium">{option.label}</div>
+                                    <Show when={option.description}>
+                                      <div class="text-xs text-zinc-500 mt-1">
+                                        {option.description}
+                                      </div>
+                                    </Show>
+                                  </button>
+                                );
+                              }}
+                            </For>
+                          </div>
+
+                          <Show when={question.custom !== false}>
+                            <input
+                              class="w-full bg-zinc-900/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500/60 focus:border-blue-500/60"
+                              placeholder="Type a custom answer"
+                              value={questionCustomInputs()[idx()] ?? ""}
+                              onInput={(e) => {
+                                const value = e.currentTarget.value;
+                                setQuestionCustomInputs((current) => {
+                                  const next = current.slice();
+                                  next[idx()] = value;
+                                  return next;
+                                });
+                              }}
+                            />
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+
+                  <div class="flex items-center justify-end gap-2">
+                    <Button variant="outline" onClick={rejectQuestion} disabled={busy()}>
+                      Skip
+                    </Button>
+                    <Button
+                      variant="primary"
+                      class="bg-blue-500 hover:bg-blue-400 text-black"
+                      onClick={replyToQuestion}
+                      disabled={busy() || !questionReady()}
+                    >
+                      Submit
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Show>
         </div>
       </Show>
     );
@@ -2855,21 +3371,95 @@ export default function App() {
         </Switch>
       </Show>
 
-      <Show when={templateModalOpen()}>
+      <Show when={modelPickerOpen()}>
         <div class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div class="bg-zinc-900 border border-zinc-800/70 w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden">
-            <div class="p-6">
-              <div class="flex items-start justify-between gap-4">
+          <div class="bg-zinc-900 border border-zinc-800/70 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden">
+            <div class="p-6 space-y-4">
+              <div class="flex items-center justify-between">
                 <div>
-                  <h3 class="text-lg font-semibold text-white">Save Template</h3>
-                  <p class="text-sm text-zinc-400 mt-1">Reuse a workflow with one tap.</p>
+                  <h3 class="text-lg font-semibold text-white">Select a model</h3>
+                  <p class="text-xs text-zinc-500">Matches the OpenCode model registry.</p>
                 </div>
                 <Button
                   variant="ghost"
-                  class="!p-2 rounded-full"
-                  onClick={() => setTemplateModalOpen(false)}
+                  onClick={() => {
+                    setModelPickerOpen(false);
+                    setModelSearch("");
+                  }}
                 >
-                  <X size={16} />
+                  Close
+                </Button>
+              </div>
+
+              <input
+                class="w-full bg-zinc-900/60 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-all"
+                placeholder="Search models or providers"
+                value={modelSearch()}
+                onInput={(e) => setModelSearch(e.currentTarget.value)}
+              />
+
+              <Show
+                when={filteredModels().length}
+                fallback={
+                  <div class="text-sm text-zinc-500">No models match that search.</div>
+                }
+              >
+                <div class="max-h-96 overflow-y-auto space-y-2 pr-1">
+                  <For each={filteredModels()}>
+                    {(model) => (
+                      <button
+                        class={`w-full text-left rounded-xl border px-3 py-3 transition-colors ${
+                          selectedModel()?.providerID === model.providerID &&
+                          selectedModel()?.modelID === model.modelID
+                            ? "border-blue-500/50 bg-blue-500/10"
+                            : "border-zinc-800 bg-zinc-950/40 hover:border-zinc-600"
+                        }`}
+                        onClick={() => {
+                          setSelectedModel(model);
+                          setModelPickerOpen(false);
+                          setModelSearch("");
+                        }}
+                      >
+                        <div class="flex items-center justify-between">
+                          <div>
+                            <div class="text-sm text-white font-medium">
+                              {model.providerName} · {model.modelName}
+                            </div>
+                            <div class="text-xs text-zinc-500 font-mono mt-1">
+                              {model.providerID}.{model.modelID}
+                            </div>
+                          </div>
+                          <span
+                            class={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full border ${
+                              model.connected
+                                ? "border-emerald-500/40 text-emerald-300"
+                                : "border-amber-500/40 text-amber-300"
+                            }`}
+                          >
+                            {model.connected ? "Connected" : "Needs auth"}
+                          </span>
+                        </div>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={templateModalOpen()}>
+        <div class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div class="bg-zinc-900 border border-zinc-800/70 w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden">
+            <div class="p-6 space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-lg font-semibold text-white">New Template</h3>
+                  <p class="text-xs text-zinc-500">Save prompts you run often.</p>
+                </div>
+                <Button variant="ghost" onClick={() => setTemplateModalOpen(false)}>
+                  Close
                 </Button>
               </div>
 

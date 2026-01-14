@@ -1,4 +1,4 @@
-import { Match, Show, Switch } from "solid-js";
+import { For, Match, Show, Switch } from "solid-js";
 
 import type { Part } from "@opencode-ai/sdk/v2/client";
 
@@ -59,6 +59,15 @@ export default function PartView(props: Props) {
   const textClass = () => (tone() === "dark" ? "text-black" : "text-neutral-100");
   const subtleTextClass = () => (tone() === "dark" ? "text-black/70" : "text-neutral-400");
   const panelBgClass = () => (tone() === "dark" ? "bg-black/10" : "bg-black/30");
+  const toolName = () => String((p() as any).tool ?? "");
+  const questionItems = () => {
+    const input = (p() as any).state?.input as Record<string, unknown> | undefined;
+    const questions = input?.questions;
+    if (Array.isArray(questions)) {
+      return questions as Array<{ header?: string; question?: string }>;
+    }
+    return [] as Array<{ header?: string; question?: string }>;
+  };
 
   return (
     <Switch>
@@ -87,7 +96,7 @@ export default function PartView(props: Props) {
             <div
               class={`text-xs font-medium ${tone() === "dark" ? "text-black" : "text-neutral-200"}`.trim()}
             >
-              Tool · {String((p() as any).tool)}
+              Tool · {toolName()}
             </div>
             <div
               class={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
@@ -106,6 +115,25 @@ export default function PartView(props: Props) {
 
           <Show when={(p() as any).state?.title}>
             <div class={`text-xs ${subtleTextClass()}`.trim()}>{String((p() as any).state.title)}</div>
+          </Show>
+
+          <Show when={toolName() === "question" && questionItems().length > 0}>
+            <div class={`rounded-lg ${panelBgClass()} p-2 text-xs ${subtleTextClass()}`.trim()}>
+              <div class="font-semibold text-[11px] uppercase tracking-wider mb-1">Question</div>
+              <For each={questionItems()}>
+                {(q) => (
+                  <div class="mb-1 last:mb-0">
+                    <Show when={q.header}>
+                      <span class="font-medium">{q.header}:</span>{" "}
+                    </Show>
+                    <span>{q.question ?? "Awaiting response"}</span>
+                  </div>
+                )}
+              </For>
+              <div class="text-[10px] text-neutral-400 mt-2">
+                Answer in the prompt below.
+              </div>
+            </div>
           </Show>
 
           <Show when={(p() as any).state?.output && typeof (p() as any).state.output === "string"}>
