@@ -38,9 +38,18 @@ This conflicts with OpenWork’s success metric: **< 5 minutes to first successf
 
 ## Current Architecture (Constraints)
 
-- Tauri backend starts engine by spawning `opencode serve …`.
-- UI connects using `@opencode-ai/sdk/v2/client`.
-- The Tauri app is a GUI process; shell rc changes won’t necessarily affect it.
+- Engine lifecycle lives in the Tauri backend (`src-tauri/src/lib.rs`), started via `Command::new("opencode")` and `opencode serve …`.
+- Current engine start discards `stdout`/`stderr` (`Stdio::null()`), so users get poor diagnostics when spawning fails.
+- UI connects using `@opencode-ai/sdk/v2/client` and assumes a working `baseUrl`.
+- The Tauri app is a GUI process; shell rc changes won’t necessarily affect it (especially macOS).
+
+## Key Insight: GUI PATH Is Not Trustworthy
+
+Even if an installer appends `~/.opencode/bin` to `.zshrc`, OpenWork (a GUI app) may still not see it until the user reboots or re-logs in. Therefore OpenWork must:
+
+- Discover `opencode` via deterministic path probing.
+- Prefer starting the engine via an absolute path (resolved by discovery).
+- Avoid depending on “restart your terminal” advice for core onboarding.
 
 ## Proposed UX
 
@@ -143,6 +152,27 @@ Execution strategy (conceptual):
 
 **Important:** the install script currently writes to `~/.opencode/bin` and may edit shell rc files to add PATH. OpenWork must not rely on that PATH change.
 
+#### Installer implementation options
+
+- **Option A (v0 / fastest): run the upstream script**
+  - Pros: minimal code, matches upstream.
+  - Cons: remote script execution; PATH edits don’t help the GUI; harder to reason about.
+  - Mitigations required: show the exact command, allow “View script”, stream logs, require explicit consent.
+
+- **Option B (recommended medium-term): native installer in Rust**
+  - Download the correct release tarball from GitHub Releases (same URL pattern the script uses).
+  - Extract the `opencode` binary and place it in `~/.opencode/bin/opencode` (or an OpenWork-managed directory).
+  - Never edit shell rc files; always start via absolute path.
+  - Pros: safer, deterministic, works in GUI context, easier to debug.
+  - Cons: more code, need per-OS archive handling.
+
+OpenWork can start with Option A behind a clear consent UI, then migrate to Option B once we’re confident in the release asset layout.
+
+#### Cancellation + retry
+
+- The install step should be cancellable.
+- Retries should re-run discovery first to avoid redundant downloads.
+
 **Windows:** do not attempt `curl | bash`.
 
 Options:
@@ -177,6 +207,28 @@ Local-only diagnostics artifact:
 
 Exportable by the user to include in bug reports.
 
+### 6) Tauri command surface (draft)
+
+To keep the UI thin and deterministic, add a minimal command surface:
+
+- `engine_doctor() -> EngineDoctorResult`
+  - Runs discovery and compatibility checks.
+- `engine_install(options) -> ExecResult`
+  - Performs guided install (Option A or B).
+  - Streams progress via a Tauri event (e.g. `engine_install_log`) so the UI can show live logs.
+- `engine_start(projectDir, opencodePath?) -> EngineInfo`
+  - Starts the engine using `opencodePath` when provided (absolute path).
+
+Where `EngineDoctorResult` includes:
+
+- `found`: boolean
+- `inPath`: boolean
+- `resolvedPath`: string | null
+- `version`: string | null
+- `recommendedStartPath`: string | null
+- `errors`: string[]
+- `warnings`: string[]
+
 ## Manual install instructions (UI copy)
 
 OpenWork should show OS-specific instructions with copy buttons.
@@ -196,6 +248,13 @@ Example:
   - User sees a clear error, can copy logs, and sees manual instructions.
 - If `opencode` is installed outside PATH:
   - OpenWork still finds and runs it via absolute path.
+
+## Rollout Plan
+
+- Phase 0: engine discovery + manual instructions (no auto install).
+- Phase 1: guided install Option A on macOS/Linux with explicit consent + log streaming.
+- Phase 2: migrate to native installer Option B for safety + determinism.
+- Phase 3: Windows installer (PowerShell/winget) or a deliberate “manual only” stance.
 
 ## Open Questions
 
