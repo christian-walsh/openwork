@@ -6,6 +6,17 @@ A simple guide to get OpenWork running on Windows.
 
 You'll need these installed first:
 
+> **Quick Install**: Run the automated installer script:
+> ```powershell
+> # Download and run the prerequisites installer
+> irm https://raw.githubusercontent.com/different-ai/openwork/main/install-prerequisites.ps1 | iex
+> 
+> # Or if you've cloned the repo:
+> .\install-prerequisites.ps1
+> ```
+
+Or install manually:
+
 ### 1. Node.js and pnpm
 - **Node.js**: Download from [nodejs.org](https://nodejs.org/) (LTS version recommended)
 - **pnpm**: After installing Node.js, run:
