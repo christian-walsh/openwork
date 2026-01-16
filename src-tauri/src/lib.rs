@@ -119,13 +119,39 @@ fn candidate_opencode_paths() -> Vec<PathBuf> {
     candidates.push(home.join(".opencode").join("bin").join(OPENCODE_EXECUTABLE));
   }
 
-  // Homebrew default paths.
-  candidates.push(PathBuf::from("/opt/homebrew/bin").join(OPENCODE_EXECUTABLE));
-  candidates.push(PathBuf::from("/usr/local/bin").join(OPENCODE_EXECUTABLE));
+  #[cfg(windows)]
+  {
+    // Windows-specific paths
+    if let Ok(local_appdata) = env::var("LOCALAPPDATA") {
+      candidates.push(PathBuf::from(local_appdata).join(".opencode").join("bin").join(OPENCODE_EXECUTABLE));
+    }
+    if let Ok(appdata) = env::var("APPDATA") {
+      candidates.push(PathBuf::from(appdata).join(".opencode").join("bin").join(OPENCODE_EXECUTABLE));
+    }
+    if let Ok(program_files) = env::var("ProgramFiles") {
+      candidates.push(PathBuf::from(program_files).join("OpenCode").join("bin").join(OPENCODE_EXECUTABLE));
+    }
+    if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
+      candidates.push(PathBuf::from(program_files_x86).join("OpenCode").join("bin").join(OPENCODE_EXECUTABLE));
+    }
+    // Scoop default path
+    if let Some(home) = home_dir() {
+      candidates.push(home.join("scoop").join("apps").join("opencode").join("current").join("bin").join(OPENCODE_EXECUTABLE));
+    }
+    // Chocolatey default path
+    candidates.push(PathBuf::from("C:\\ProgramData\\chocolatey\\bin").join(OPENCODE_EXECUTABLE));
+  }
 
-  // Common Linux paths.
-  candidates.push(PathBuf::from("/usr/bin").join(OPENCODE_EXECUTABLE));
-  candidates.push(PathBuf::from("/usr/local/bin").join(OPENCODE_EXECUTABLE));
+  #[cfg(not(windows))]
+  {
+    // Homebrew default paths.
+    candidates.push(PathBuf::from("/opt/homebrew/bin").join(OPENCODE_EXECUTABLE));
+    candidates.push(PathBuf::from("/usr/local/bin").join(OPENCODE_EXECUTABLE));
+
+    // Common Linux paths.
+    candidates.push(PathBuf::from("/usr/bin").join(OPENCODE_EXECUTABLE));
+    candidates.push(PathBuf::from("/usr/local/bin").join(OPENCODE_EXECUTABLE));
+  }
 
   candidates
 }
@@ -250,15 +276,29 @@ fn resolve_opencode_config_path(scope: &str, project_dir: &str) -> Result<PathBu
       Ok(PathBuf::from(project_dir).join("opencode.json"))
     }
     "global" => {
-      let base = if let Ok(dir) = env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(dir)
-      } else if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".config")
-      } else {
-        return Err("Unable to resolve config directory".to_string());
-      };
+      #[cfg(windows)]
+      {
+        let base = if let Ok(appdata) = env::var("APPDATA") {
+          PathBuf::from(appdata)
+        } else if let Ok(home) = env::var("USERPROFILE") {
+          PathBuf::from(home).join("AppData").join("Roaming")
+        } else {
+          return Err("Unable to resolve config directory".to_string());
+        };
+        Ok(base.join("opencode").join("opencode.json"))
+      }
 
-      Ok(base.join("opencode").join("opencode.json"))
+      #[cfg(not(windows))]
+      {
+        let base = if let Ok(dir) = env::var("XDG_CONFIG_HOME") {
+          PathBuf::from(dir)
+        } else if let Ok(home) = env::var("HOME") {
+          PathBuf::from(home).join(".config")
+        } else {
+          return Err("Unable to resolve config directory".to_string());
+        };
+        Ok(base.join("opencode").join("opencode.json"))
+      }
     }
     _ => Err("scope must be 'project' or 'global'".to_string()),
   }
@@ -340,12 +380,54 @@ fn engine_doctor() -> EngineDoctorResult {
 fn engine_install() -> Result<ExecResult, String> {
   #[cfg(windows)]
   {
-    return Ok(ExecResult {
+    // Try Scoop first (most common on Windows)
+    let scoop_result = Command::new("scoop")
+      .arg("install")
+      .arg("opencode")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .output();
+
+    if let Ok(output) = scoop_result {
+      let status = output.status.code().unwrap_or(-1);
+      if output.status.success() {
+        return Ok(ExecResult {
+          ok: true,
+          status,
+          stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+          stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+      }
+    }
+
+    // Try Chocolatey as fallback
+    let choco_result = Command::new("choco")
+      .arg("install")
+      .arg("opencode")
+      .arg("-y")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .output();
+
+    if let Ok(output) = choco_result {
+      let status = output.status.code().unwrap_or(-1);
+      if output.status.success() {
+        return Ok(ExecResult {
+          ok: true,
+          status,
+          stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+          stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+      }
+    }
+
+    // If both package managers failed, provide manual instructions
+    Ok(ExecResult {
       ok: false,
       status: -1,
       stdout: String::new(),
-      stderr: "Guided install is not supported on Windows yet. Install OpenCode via Scoop/Chocolatey or https://opencode.ai/install, then restart OpenWork.".to_string(),
-    });
+      stderr: "Automatic installation failed. Please install OpenCode manually:\n\n1. Scoop: scoop install opencode\n2. Chocolatey: choco install opencode -y\n3. Manual: Download from https://opencode.ai/install\n\nAfter installation, restart OpenWork.".to_string(),
+    })
   }
 
   #[cfg(not(windows))]
@@ -426,9 +508,18 @@ fn engine_start(
   notes.extend(more_notes);
   let Some(program) = program else {
     let notes_text = notes.join("\n");
-    return Err(format!(
-      "OpenCode CLI not found.\n\nInstall with:\n- brew install anomalyco/tap/opencode\n- curl -fsSL https://opencode.ai/install | bash\n\nNotes:\n{notes_text}"
-    ));
+    #[cfg(windows)]
+    {
+      return Err(format!(
+        "OpenCode CLI not found.\n\nInstall with:\n- scoop install opencode\n- choco install opencode -y\n- Download from https://opencode.ai/install\n\nAfter installation, restart OpenWork.\n\nNotes:\n{notes_text}"
+      ));
+    }
+    #[cfg(not(windows))]
+    {
+      return Err(format!(
+        "OpenCode CLI not found.\n\nInstall with:\n- brew install anomalyco/tap/opencode\n- curl -fsSL https://opencode.ai/install | bash\n\nNotes:\n{notes_text}"
+      ));
+    }
   };
 
   let mut command = Command::new(&program);

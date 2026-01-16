@@ -1,0 +1,78 @@
+name: Release App (Windows)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v0.1.2). Leave empty to use current ref."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-tauri:
+    name: Build + Publish (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set release tag
+        shell: pwsh
+        run: |
+          $TAG_INPUT = "${{ inputs.tag }}"
+          if ($TAG_INPUT) {
+            if ($TAG_INPUT -match '^v') {
+              $TAG = $TAG_INPUT
+            } else {
+              $TAG = "v$TAG_INPUT"
+            }
+          } else {
+            $TAG = "${{ github.ref_name }}"
+          }
+          echo "RELEASE_TAG=$TAG" >> $env:GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build + upload (tauri-action)
+        uses: tauri-apps/tauri-action@v0.5.17
+        env:
+          CI: true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: OpenWork ${{ env.RELEASE_TAG }}
+          releaseBody: See the assets to download this version and install.
+          releaseDraft: false
+          prerelease: false
+          projectPath: .
+          tauriScript: pnpm exec tauri -vvv
+          args: --target x86_64-pc-windows-msvc --bundles msi
+          retryAttempts: 3

@@ -18,7 +18,10 @@ The goal: make “agentic work” feel like a product, not a terminal.
 
 
 ## Quick start
-Download the dmg here https://github.com/different-ai/openwork/releases (or install from source below)
+
+**macOS**: Download the `.dmg` from [Releases](https://github.com/different-ai/openwork/releases)  
+**Windows**: Download the `.msi` from [Releases](https://github.com/different-ai/openwork/releases) or see [INSTALL_WINDOWS.md](INSTALL_WINDOWS.md) for detailed instructions  
+**From source**: See installation steps below
 
 ## Why
 
