@@ -24,7 +24,19 @@ Or install manually:
   npm install -g pnpm
   ```
 
-### 2. Rust Toolchain
+### 2. Microsoft C++ Build Tools (REQUIRED)
+**⚠️ IMPORTANT**: Rust on Windows requires the Microsoft C++ Build Tools. Without this, you'll get build script errors.
+
+- **Visual Studio Build Tools**: Download from [Visual Studio Downloads](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+- Run the installer and select **"Desktop development with C++"** workload
+- This includes the MSVC compiler and Windows SDK needed for Rust
+
+**Or install via winget:**
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+### 3. Rust Toolchain
 - **Rust**: Download from [rustup.rs](https://rustup.rs/) or install via:
   ```powershell
   # Using winget
@@ -38,7 +50,7 @@ Or install manually:
   rustc --version
   ```
 
-### 3. OpenCode CLI
+### 4. OpenCode CLI
 OpenWork needs the OpenCode CLI to function. Install it using one of these methods:
 
 #### Option A: Scoop (Recommended)
@@ -132,10 +144,25 @@ opencode --version
 - Verify OpenCode is working: `opencode serve --help`
 - Check Windows Firewall isn't blocking localhost connections
 
-### Build errors
+### Build errors (build script failures / linker not found)
+**Most common issue**: Missing C++ Build Tools or linker not in PATH
+- **Error**: `linker 'link.exe' not found` or `error: could not compile` (build script)
+- **Quick fix**: Run the linker fix script:
+  ```powershell
+  .\fix-rust-linker.ps1
+  ```
+- **Full solution**: 
+  1. Install Visual Studio Build Tools with "Desktop development with C++" workload
+  2. Restart your terminal (required!)
+  3. If still not working, run `.\fix-rust-linker.ps1` to configure environment
+- Verify installation: Check for `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`
+- Verify linker: Run `link.exe` in PowerShell (should show linker help, not "command not found")
+
+### Other build errors
 - Ensure Rust toolchain is installed: `rustc --version`
 - Try `cargo clean` and rebuild
 - Make sure you're using a recent version of Rust (1.70+)
+- Ensure C++ Build Tools are installed (see above)
 
 ### Missing dependencies
 - Node.js version 18+ required
